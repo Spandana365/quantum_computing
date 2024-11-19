@@ -1,0 +1,306 @@
+!pip install cirq
+!pip install biopython
+!pip install ete3
+!pip install ipywidgets
+!pip install widgetsnbextension
+!pip install matplotlib
+!apt-get install -qq -y libgtk2.0-dev
+
+def needleman_wunsch(seq1, seq2, match_score=1, gap_cost=1, mismatch_cost=1):
+    n, m = len(seq1), len(seq2)
+    # Initialize the scoring matrix
+    score_matrix = [[0 for j in range(m + 1)] for i in range(n + 1)]
+
+    # Fill the scoring matrix
+    for i in range(1, n + 1):
+        score_matrix[i][0] = i * -gap_cost
+    for j in range(1, m + 1):
+        score_matrix[0][j] = j * -gap_cost
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            match = score_matrix[i - 1][j - 1] + (match_score if seq1[i - 1] == seq2[j - 1] else -mismatch_cost)
+            delete = score_matrix[i - 1][j] - gap_cost
+            insert = score_matrix[i][j - 1] - gap_cost
+            score_matrix[i][j] = max(match, delete, insert)
+
+    # Traceback to get the aligned sequences
+    align1, align2 = '', ''
+    i, j = n, m
+    while i > 0 or j > 0:
+        current_score = score_matrix[i][j]
+        if i > 0 and j > 0 and (current_score == score_matrix[i - 1][j - 1] + (match_score if seq1[i - 1] == seq2[j - 1] else -mismatch_cost)):
+            align1 = seq1[i - 1] + align1
+            align2 = seq2[j - 1] + align2
+            i -= 1
+            j -= 1
+        elif i > 0 and (current_score == score_matrix[i - 1][j] - gap_cost):
+            align1 = seq1[i - 1] + align1
+            align2 = '-' + align2
+            i -= 1
+        else:
+            align1 = '-' + align1
+            align2 = seq2[j - 1] + align2
+            j -= 1
+
+    # Calculate the match probability
+    match_count = sum([1 for a, b in zip(align1, align2) if a == b])
+    total_count = len(align1)
+    match_probability = match_count / total_count
+
+    return align1, align2, match_probability
+
+import cirq
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+
+# Function to convert a genetic sequence to binary representation (A=00, T=01, G=10, C=11)
+def convert_to_binary(seq):
+    mapping = {'A': '00', 'C': '01', 'G': '10', 'T': '11'}
+    try:
+        return [mapping[char] for char in seq]
+    except KeyError as e:
+        raise ValueError(f"Invalid character in sequence: {e}")
+
+# Function to create and simulate a quantum circuit for sequence alignment
+def align_sequences_quantum(seq1, seq2, repetitions=50000):
+    # Convert sequences to binary representation
+    seq1_bin = convert_to_binary(seq1)
+    seq2_bin = convert_to_binary(seq2)
+
+    # Flatten the binary representation
+    seq1_flat = [int(bit) for bits in seq1_bin for bit in bits]
+    seq2_flat = [int(bit) for bits in seq2_bin for bit in bits]
+
+    # Ensure equal length by padding with 0s
+    max_len = max(len(seq1_flat), len(seq2_flat))
+    seq1_flat += [0] * (max_len - len(seq1_flat))
+    seq2_flat += [0] * (max_len - len(seq2_flat))
+
+    # Number of qubits needed
+    n = max_len
+
+    # Create qubits
+    qubits = [cirq.LineQubit(i) for i in range(n)]
+
+    # Initialize a circuit
+    circuit = cirq.Circuit()
+
+    # Apply Hadamard gates to put qubits in superposition
+    circuit.append([cirq.H(q) for q in qubits])
+
+    # Apply scoring gates based on sequence alignment
+    for i in range(n):
+        if seq1_flat[i] == seq2_flat[i]:
+            circuit.append(cirq.Z(qubits[i]))
+        else:
+            circuit.append(cirq.X(qubits[i]))
+
+    # Apply Hadamard gates again before measurement
+    circuit.append([cirq.H(q) for q in qubits])
+
+    # Measure the qubits
+    circuit.append([cirq.measure(q, key=f'qubit_{i}') for i, q in enumerate(qubits)])
+
+    # Print the circuit
+    #print("Quantum Circuit:")
+    #print(circuit)
+
+    # Initialize a simulator
+    simulator = cirq.DensityMatrixSimulator()
+
+    # Simulate the circuit
+    result = simulator.run(circuit, repetitions=repetitions)
+
+    # Extract results
+    measurements = result.measurements
+
+    # Calculate probabilities of matches and mismatches
+    match_count = 0
+    mismatch_count = 0
+
+    for i in range(n):
+        counts = measurements[f'qubit_{i}']
+        match_count += np.sum(counts == 0)  # Measure 0 corresponds to match (Z gate)
+        mismatch_count += np.sum(counts == 1)  # Measure 1 corresponds to mismatch (X gate)
+
+    total_measurements = match_count + mismatch_count
+    match_probability = match_count / total_measurements
+    mismatch_probability = mismatch_count / total_measurements
+
+    return match_probability, mismatch_probability
+
+    circuit = cirq.Circuit()
+    qubits = [cirq.LineQubit(i) for i in range(len(seq1) * 2)]
+
+    circuit.append([cirq.H(q) for q in qubits])
+    for i in range(len(seq1) * 2):
+        if seq1_flat[i] == seq2_flat[i]:
+            circuit.append(cirq.Z(qubits[i]))
+        else:
+            circuit.append(cirq.X(qubits[i]))
+    circuit.append([cirq.H(q) for q in qubits])
+    circuit.append([cirq.measure(q, key=f'qubit_{i}') for i, q in enumerate(qubits)])
+
+    # Display the circuit
+    print(circuit)
+    cirq.vis.plot_circuit(circuit)
+    plt.show()
+
+from ipywidgets import FileUpload, Dropdown, Button, VBox, Output
+import io
+from Bio import SeqIO
+import numpy as np
+from scipy.cluster.hierarchy import linkage, dendrogram
+from scipy.spatial.distance import squareform
+import matplotlib.pyplot as plt
+
+# Create FileUpload widget
+uploaded_file = FileUpload(accept=".txt", multiple=True)
+
+# Create Output widget for displaying results
+output_area = Output()
+
+# Create empty lists to store file names and selected organisms
+file_names = []
+selected_organisms = []
+
+# Dictionary to store sequences
+genome_data = {}
+
+# Callback function to handle file upload
+def handle_file_upload(change):
+    global file_names, genome_data, dropdown_organisms
+    uploaded_files = uploaded_file.value
+    if uploaded_files:
+        file_names = [file_name.replace('.txt', '') for file_name in uploaded_files.keys()]
+        # Update dropdown options
+        for dropdown in dropdown_organisms:
+            dropdown.options = ['Choose Organism'] + file_names
+        # Clear selected organisms
+        selected_organisms.clear()
+        # Read and store sequences
+        genome_data.clear()
+        for file_name, file_info in uploaded_files.items():
+            content = file_info['content'].decode('utf-8').strip()
+            genome_data[file_name.replace('.txt', '')] = content
+
+# Callback function to process sequences and construct tree
+def process_sequences(b):
+    with output_area:
+        output_area.clear_output()
+
+        # Check if files have been uploaded
+        if not genome_data:
+            print("Please upload files first.")
+            return
+
+        # Ensure all dropdowns have selections
+        selected_organisms = [dropdown.value for dropdown in dropdown_organisms if dropdown.value != 'Choose Organism']
+        if len(selected_organisms) != len(dropdown_organisms):
+            print("Please select organisms for all dropdowns.")
+            print(f"Selected organisms: {selected_organisms}")
+            print(f"Dropdown values: {[dropdown.value for dropdown in dropdown_organisms]}")
+            return
+
+        # Proceed with processing sequences
+        results_classical = []
+        results_quantum = []
+        distances_classical = []
+        distances_quantum = []
+
+        for i in range(len(selected_organisms)):
+            for j in range(i + 1, len(selected_organisms)):
+                seq1 = genome_data[selected_organisms[i]]
+                seq2 = genome_data[selected_organisms[j]]
+
+                # Classical approach (example using needleman_wunsch)
+                _, _, classical_match = needleman_wunsch(seq1, seq2)
+                results_classical.append((selected_organisms[i], selected_organisms[j], classical_match))
+                distances_classical.append(classical_match)
+
+                # Quantum approach (example using align_sequences_quantum)
+                quantum_match, _ = align_sequences_quantum(seq1, seq2)
+                results_quantum.append((selected_organisms[i], selected_organisms[j], quantum_match))
+                distances_quantum.append(1 - quantum_match)  # Convert match to distance (1 - similarity)
+
+        # Build distance matrices in lower triangle format
+        matrix_size = len(selected_organisms)
+        matrix_classical = np.zeros((matrix_size, matrix_size))
+        matrix_quantum = np.zeros((matrix_size, matrix_size))
+
+        k_classical = 0
+        k_quantum = 0
+
+        for i in range(matrix_size):
+            for j in range(i + 1, matrix_size):
+                matrix_classical[i, j] = distances_classical[k_classical]
+                matrix_quantum[i, j] = distances_quantum[k_quantum]
+                k_classical += 1
+                k_quantum += 1
+
+        # Make matrices symmetric
+        matrix_classical = matrix_classical + matrix_classical.T - np.diag(matrix_classical.diagonal())
+        matrix_quantum = matrix_quantum + matrix_quantum.T - np.diag(matrix_quantum.diagonal())
+
+        # Display match probabilities
+        print("Classical Match Probabilities:")
+        for org1, org2, classical_match in results_classical:
+            print(f"{org1} vs {org2}: {classical_match}")
+
+        print("\nQuantum Match Probabilities:")
+        for org1, org2, quantum_match in results_quantum:
+            print(f"{org1} vs {org2}: {quantum_match}")
+
+        # Display distance matrices for debugging
+        print("\nDistance Matrix - Classical:")
+        print(matrix_classical)
+
+        print("\nDistance Matrix - Quantum:")
+        print(matrix_quantum)
+
+        # Construct phylogenetic trees using hierarchical clustering from scipy
+        try:
+            # Convert matrices to condensed form
+            condensed_matrix_classical = squareform(matrix_classical)
+            condensed_matrix_quantum = squareform(matrix_quantum)
+
+            # Perform hierarchical clustering
+            linkage_matrix_classical = linkage(condensed_matrix_classical, method='average', metric='euclidean')
+            linkage_matrix_quantum = linkage(condensed_matrix_quantum, method='average', metric='euclidean')
+
+            # Plot dendrograms
+            plt.figure(figsize=(16, 8))
+
+            plt.subplot(1, 2, 1)
+            dendrogram(linkage_matrix_classical, labels=selected_organisms, orientation='right', color_threshold=0)
+            plt.title('Phylogenetic Tree (Classical)')
+            plt.xlabel('Distance')
+            plt.tight_layout()
+
+            plt.subplot(1, 2, 2)
+            dendrogram(linkage_matrix_quantum, labels=selected_organisms, orientation='right', color_threshold=0)
+            plt.title('Phylogenetic Tree (Quantum)')
+            plt.xlabel('Distance')
+            plt.tight_layout()
+
+            plt.show()
+
+        except Exception as e:
+            print(f"Error constructing phylogenetic tree: {e}")
+
+# Attach event handler to file upload widget
+uploaded_file.observe(handle_file_upload, names='value')
+
+# Initialize Dropdown widgets for organism selection
+dropdown_organisms = [Dropdown(options=['Choose Organism'], description=f"Organism {idx + 1}:") for idx in range(4)]
+
+# Create button to trigger sequence processing
+process_button = Button(description="Process Sequences")
+process_button.on_click(process_sequences)
+
+# Display widgets
+display(VBox([uploaded_file, VBox(dropdown_organisms), process_button, output_area]))
+
+
